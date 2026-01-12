@@ -1,22 +1,242 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>Gesture Controlled Particle System</title>
-  <link rel="stylesheet" href="style.css" />
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hand Tracking Particle Morph</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        #video-container { position: absolute; bottom: 20px; right: 20px; width: 200px; border: 2px solid #444; border-radius: 8px; overflow: hidden; transform: scaleX(-1); }
+        #ui { position: absolute; top: 20px; left: 20px; color: white; background: rgba(0,0,0,0.6); padding: 15px; border-radius: 10px; pointer-events: none; }
+        .hint { font-size: 0.8em; color: #aaa; margin-top: 5px; }
+        canvas { display: block; }
+    </style>
 </head>
 <body>
+    <div id="ui">
+        <h2 style="margin:0">Aether Particles</h2>
+        <div id="status">Initializing Camera...</div>
+        <div class="hint">Pinch to Expand • Move Hand to Rotate • Open Palm to Change Shape</div>
+    </div>
+    <div id="video-container">
+        <video id="webcam" style="width: 100%; height: auto;" autoplay playsinline></video>
+    </div>
 
-<video id="video" autoplay muted playsinline></video>
-<canvas id="three-canvas"></canvas>
+    <script id="vertexShader" type="x-shader/x-vertex">
+        attribute vec3 position2;
+        attribute vec3 color;
+        uniform float uProgress;
+        uniform float uTime;
+        uniform float uExpansion;
+        uniform vec3 uBaseColor;
+        varying vec3 vColor;
 
-<!-- Three.js -->
-<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>
+        void main() {
+            // Morph between two shapes
+            vec3 pos = mix(position, position2, uProgress);
+            
+            // Add subtle noise/jitter
+            pos.x += sin(uTime + pos.z) * 0.1;
+            pos.y += cos(uTime + pos.x) * 0.1;
 
-<!-- MediaPipe Hands -->
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+            // Hand expansion
+            pos *= uExpansion;
 
-<script type="module" src="main.js"></script>
+            vColor = uBaseColor;
+            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+            gl_PointSize = (15.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+        }
+    </script>
+
+    <script id="fragmentShader" type="x-shader/x-fragment">
+        varying vec3 vColor;
+        void main() {
+            float dist = distance(gl_PointCoord, vec2(0.5));
+            if (dist > 0.5) discard;
+            float alpha = 1.0 - smoothstep(0.0, 0.5, dist);
+            gl_FragColor = vec4(vColor, alpha);
+        }
+    </script>
+
+    <script>
+        const COUNT = 15000;
+        let scene, camera, renderer, particles, material;
+        let currentShapeIdx = 0;
+        let targetProgress = 0;
+        let expansion = 1.0;
+        let baseHue = 0.5;
+
+        // Shape Generators
+        const shapes = [
+            () => { // Sphere
+                const pos = [];
+                for(let i=0; i<COUNT; i++) {
+                    const phi = Math.acos(-1 + (2 * i) / COUNT);
+                    const theta = Math.sqrt(COUNT * Math.PI) * phi;
+                    pos.push(Math.cos(theta)*Math.sin(phi)*5, Math.sin(theta)*Math.sin(phi)*5, Math.cos(phi)*5);
+                }
+                return pos;
+            },
+            () => { // Heart
+                const pos = [];
+                for(let i=0; i<COUNT; i++) {
+                    const t = Math.random() * Math.PI * 2;
+                    const r = 0.3;
+                    const x = 16 * Math.pow(Math.sin(t), 3);
+                    const y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
+                    pos.push(x * r, y * r, (Math.random()-0.5)*2);
+                }
+                return pos;
+            },
+            () => { // Saturn
+                const pos = [];
+                for(let i=0; i<COUNT; i++) {
+                    if (i < COUNT * 0.4) { // Sphere
+                        const r = 3;
+                        const u = Math.random();
+                        const v = Math.random();
+                        const theta = 2 * Math.PI * u;
+                        const phi = Math.acos(2 * v - 1);
+                        pos.push(r*Math.sin(phi)*Math.cos(theta), r*Math.sin(phi)*Math.sin(theta), r*Math.cos(phi));
+                    } else { // Rings
+                        const r = 5 + Math.random() * 3;
+                        const theta = Math.random() * Math.PI * 2;
+                        pos.push(r*Math.cos(theta), (Math.random()-0.5)*0.2, r*Math.sin(theta));
+                    }
+                }
+                return pos;
+            }
+        ];
+
+        function initThree() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+            camera.position.z = 20;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.body.appendChild(renderer.domElement);
+
+            const geometry = new THREE.BufferGeometry();
+            const pos1 = new Float32Array(shapes[0]());
+            const pos2 = new Float32Array(shapes[1]());
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(pos1, 3));
+            geometry.setAttribute('position2', new THREE.BufferAttribute(pos2, 3));
+
+            material = new THREE.ShaderMaterial({
+                uniforms: {
+                    uProgress: { value: 0 },
+                    uTime: { value: 0 },
+                    uExpansion: { value: 1.0 },
+                    uBaseColor: { value: new THREE.Color(0x00ffff) }
+                },
+                vertexShader: document.getElementById('vertexShader').textContent,
+                fragmentShader: document.getElementById('fragmentShader').textContent,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            particles = new THREE.Points(geometry, material);
+            scene.add(particles);
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        async function initHands() {
+            const video = document.getElementById('webcam');
+            const status = document.getElementById('status');
+
+            const hands = new Hands({
+                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+            });
+
+            hands.setOptions({
+                maxNumHands: 1,
+                modelComplexity: 1,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            hands.onResults((results) => {
+                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                    status.innerText = "Tracking Hand...";
+                    const landmarks = results.multiHandLandmarks[0];
+                    
+                    // 1. Expansion via Pinch (Thumb tip 4 and Index tip 8)
+                    const dx = landmarks[4].x - landmarks[8].x;
+                    const dy = landmarks[4].y - landmarks[8].y;
+                    const dist = Math.sqrt(dx*dx + dy*dy);
+                    expansion = 1.0 + dist * 8.0;
+
+                    // 2. Rotation via Hand Position
+                    particles.rotation.y = (landmarks[9].x - 0.5) * 4;
+                    particles.rotation.x = (landmarks[9].y - 0.5) * 4;
+
+                    // 3. Color via Hand Elevation
+                    baseHue = landmarks[9].y;
+
+                    // 4. Shape Switching (Simple trigger: hand high/low)
+                    if (landmarks[9].y < 0.2) switchShape(1); // Heart
+                    else if (landmarks[9].y > 0.8) switchShape(2); // Saturn
+                    else if (landmarks[4].x > 0.8) switchShape(0); // Sphere
+                } else {
+                    status.innerText = "No Hand Detected";
+                }
+            });
+
+            const cameraUtils = new Camera(video, {
+                onFrame: async () => {
+                    await hands.send({image: video});
+                },
+                width: 640,
+                height: 480
+            });
+            cameraUtils.start();
+        }
+
+        function switchShape(idx) {
+            if (idx === currentShapeIdx) return;
+            
+            const nextShapeData = new Float32Array(shapes[idx]());
+            // Move current target to origin, and new shape to target
+            particles.geometry.attributes.position.array.set(particles.geometry.attributes.position2.array);
+            particles.geometry.attributes.position.needsUpdate = true;
+            
+            particles.geometry.attributes.position2.array.set(nextShapeData);
+            particles.geometry.attributes.position2.needsUpdate = true;
+            
+            material.uniforms.uProgress.value = 0;
+            currentShapeIdx = idx;
+        }
+
+        function animate(time) {
+            requestAnimationFrame(animate);
+            
+            // Smooth morphing
+            material.uniforms.uProgress.value += (1.0 - material.uniforms.uProgress.value) * 0.05;
+            
+            // Update Uniforms
+            material.uniforms.uTime.value = time * 0.001;
+            material.uniforms.uExpansion.value += (expansion - material.uniforms.uExpansion.value) * 0.1;
+            material.uniforms.uBaseColor.value.setHSL(baseHue, 0.8, 0.6);
+
+            renderer.render(scene, camera);
+        }
+
+        initThree();
+        initHands();
+        animate(0);
+    </script>
 </body>
 </html>
