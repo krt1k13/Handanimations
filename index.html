@@ -1,242 +1,274 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hand Tracking Particle Morph</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
-    <style>
-        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
-        #video-container { position: absolute; bottom: 20px; right: 20px; width: 200px; border: 2px solid #444; border-radius: 8px; overflow: hidden; transform: scaleX(-1); }
-        #ui { position: absolute; top: 20px; left: 20px; color: white; background: rgba(0,0,0,0.6); padding: 15px; border-radius: 10px; pointer-events: none; }
-        .hint { font-size: 0.8em; color: #aaa; margin-top: 5px; }
-        canvas { display: block; }
-    </style>
+  <meta charset="UTF-8" />
+  <title>Hand Controlled 3D Particle Solar System</title>
+
+  <!-- ===== CSS ===== -->
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background: #000;
+      font-family: Arial, sans-serif;
+    }
+
+    #ui {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0,0,0,0.75);
+      padding: 12px;
+      border-radius: 8px;
+      color: white;
+      z-index: 10;
+      width: 220px;
+    }
+
+    #ui h3 {
+      margin: 0 0 10px 0;
+      font-size: 14px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    #ui select, #ui input {
+      width: 100%;
+      margin-bottom: 10px;
+    }
+
+    #video {
+      display: none;
+    }
+  </style>
 </head>
+
 <body>
-    <div id="ui">
-        <h2 style="margin:0">Aether Particles</h2>
-        <div id="status">Initializing Camera...</div>
-        <div class="hint">Pinch to Expand • Move Hand to Rotate • Open Palm to Change Shape</div>
-    </div>
-    <div id="video-container">
-        <video id="webcam" style="width: 100%; height: auto;" autoplay playsinline></video>
-    </div>
+  <!-- UI PANEL -->
+  <div id="ui">
+    <h3>Control Panel</h3>
+    <label>Template</label>
+    <select id="template">
+      <option value="solar">Solar System</option>
+      <option value="heart">Heart</option>
+      <option value="flower">Flower</option>
+      <option value="sacred">Sacred Symbol</option>
+    </select>
 
-    <script id="vertexShader" type="x-shader/x-vertex">
-        attribute vec3 position2;
-        attribute vec3 color;
-        uniform float uProgress;
-        uniform float uTime;
-        uniform float uExpansion;
-        uniform vec3 uBaseColor;
-        varying vec3 vColor;
+    <label>Particle Color</label>
+    <input type="color" id="color" value="#00ffff">
+  </div>
 
-        void main() {
-            // Morph between two shapes
-            vec3 pos = mix(position, position2, uProgress);
-            
-            // Add subtle noise/jitter
-            pos.x += sin(uTime + pos.z) * 0.1;
-            pos.y += cos(uTime + pos.x) * 0.1;
+  <video id="video" autoplay playsinline></video>
 
-            // Hand expansion
-            pos *= uExpansion;
+  <!-- ===== LIBRARIES ===== -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.158.0/examples/js/controls/OrbitControls.js"></script>
 
-            vColor = uBaseColor;
-            vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
-            gl_PointSize = (15.0 / -mvPosition.z);
-            gl_Position = projectionMatrix * mvPosition;
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+  <!-- ===== MAIN SCRIPT ===== -->
+  <script>
+    /* ============================
+       SCENE SETUP
+    ============================ */
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 2000);
+    camera.position.z = 40;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    const light = new THREE.PointLight(0xffffff, 2);
+    light.position.set(50, 50, 50);
+    scene.add(light);
+
+    /* ============================
+       AUDIO REACTIVE
+    ============================ */
+    let audioLevel = 0;
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+      const ctx = new AudioContext();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      const source = ctx.createMediaStreamSource(stream);
+      source.connect(analyser);
+
+      const data = new Uint8Array(analyser.frequencyBinCount);
+
+      function audioLoop() {
+        analyser.getByteFrequencyData(data);
+        audioLevel = data.reduce((a,b)=>a+b,0)/data.length/255;
+        requestAnimationFrame(audioLoop);
+      }
+      audioLoop();
+    });
+
+    /* ============================
+       OBJECT CONTAINERS
+    ============================ */
+    let currentGroup = new THREE.Group();
+    scene.add(currentGroup);
+
+    let particles;
+
+    const loader = new THREE.TextureLoader();
+    const earthTex = loader.load("https://threejs.org/examples/textures/planets/earth_atmos_2048.jpg");
+    const saturnTex = loader.load("https://threejs.org/examples/textures/planets/saturn.jpg");
+
+    /* ============================
+       TEMPLATES
+    ============================ */
+    function clearGroup() {
+      scene.remove(currentGroup);
+      currentGroup = new THREE.Group();
+      scene.add(currentGroup);
+    }
+
+    function createSolarSystem() {
+      clearGroup();
+
+      const earth = new THREE.Mesh(
+        new THREE.SphereGeometry(3, 64, 64),
+        new THREE.MeshStandardMaterial({ map: earthTex })
+      );
+
+      const saturn = new THREE.Mesh(
+        new THREE.SphereGeometry(4, 64, 64),
+        new THREE.MeshStandardMaterial({ map: saturnTex })
+      );
+      saturn.position.x = 12;
+
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(5, 7, 64),
+        new THREE.MeshBasicMaterial({ color: 0xaa8844, side: THREE.DoubleSide })
+      );
+      ring.rotation.x = Math.PI / 2;
+      saturn.add(ring);
+
+      currentGroup.add(earth, saturn);
+    }
+
+    function createParticles(shape) {
+      clearGroup();
+      const geometry = new THREE.BufferGeometry();
+      const count = 5000;
+      const positions = [];
+
+      for (let i = 0; i < count; i++) {
+        let x,y,z;
+
+        if (shape === "heart") {
+          const t = Math.random() * Math.PI * 2;
+          x = 16 * Math.pow(Math.sin(t),3);
+          y = 13*Math.cos(t)-5*Math.cos(2*t)-2*Math.cos(3*t)-Math.cos(4*t);
+          z = (Math.random()-0.5)*5;
         }
-    </script>
-
-    <script id="fragmentShader" type="x-shader/x-fragment">
-        varying vec3 vColor;
-        void main() {
-            float dist = distance(gl_PointCoord, vec2(0.5));
-            if (dist > 0.5) discard;
-            float alpha = 1.0 - smoothstep(0.0, 0.5, dist);
-            gl_FragColor = vec4(vColor, alpha);
+        else if (shape === "flower") {
+          const r = Math.random()*10;
+          const a = Math.random()*Math.PI*2;
+          x = r*Math.cos(a);
+          y = r*Math.sin(a);
+          z = Math.sin(a*6)*3;
         }
-    </script>
-
-    <script>
-        const COUNT = 15000;
-        let scene, camera, renderer, particles, material;
-        let currentShapeIdx = 0;
-        let targetProgress = 0;
-        let expansion = 1.0;
-        let baseHue = 0.5;
-
-        // Shape Generators
-        const shapes = [
-            () => { // Sphere
-                const pos = [];
-                for(let i=0; i<COUNT; i++) {
-                    const phi = Math.acos(-1 + (2 * i) / COUNT);
-                    const theta = Math.sqrt(COUNT * Math.PI) * phi;
-                    pos.push(Math.cos(theta)*Math.sin(phi)*5, Math.sin(theta)*Math.sin(phi)*5, Math.cos(phi)*5);
-                }
-                return pos;
-            },
-            () => { // Heart
-                const pos = [];
-                for(let i=0; i<COUNT; i++) {
-                    const t = Math.random() * Math.PI * 2;
-                    const r = 0.3;
-                    const x = 16 * Math.pow(Math.sin(t), 3);
-                    const y = 13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t);
-                    pos.push(x * r, y * r, (Math.random()-0.5)*2);
-                }
-                return pos;
-            },
-            () => { // Saturn
-                const pos = [];
-                for(let i=0; i<COUNT; i++) {
-                    if (i < COUNT * 0.4) { // Sphere
-                        const r = 3;
-                        const u = Math.random();
-                        const v = Math.random();
-                        const theta = 2 * Math.PI * u;
-                        const phi = Math.acos(2 * v - 1);
-                        pos.push(r*Math.sin(phi)*Math.cos(theta), r*Math.sin(phi)*Math.sin(theta), r*Math.cos(phi));
-                    } else { // Rings
-                        const r = 5 + Math.random() * 3;
-                        const theta = Math.random() * Math.PI * 2;
-                        pos.push(r*Math.cos(theta), (Math.random()-0.5)*0.2, r*Math.sin(theta));
-                    }
-                }
-                return pos;
-            }
-        ];
-
-        function initThree() {
-            scene = new THREE.Scene();
-            camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
-            camera.position.z = 20;
-
-            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-            renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(window.devicePixelRatio);
-            document.body.appendChild(renderer.domElement);
-
-            const geometry = new THREE.BufferGeometry();
-            const pos1 = new Float32Array(shapes[0]());
-            const pos2 = new Float32Array(shapes[1]());
-
-            geometry.setAttribute('position', new THREE.BufferAttribute(pos1, 3));
-            geometry.setAttribute('position2', new THREE.BufferAttribute(pos2, 3));
-
-            material = new THREE.ShaderMaterial({
-                uniforms: {
-                    uProgress: { value: 0 },
-                    uTime: { value: 0 },
-                    uExpansion: { value: 1.0 },
-                    uBaseColor: { value: new THREE.Color(0x00ffff) }
-                },
-                vertexShader: document.getElementById('vertexShader').textContent,
-                fragmentShader: document.getElementById('fragmentShader').textContent,
-                transparent: true,
-                blending: THREE.AdditiveBlending,
-                depthWrite: false
-            });
-
-            particles = new THREE.Points(geometry, material);
-            scene.add(particles);
-
-            window.addEventListener('resize', () => {
-                camera.aspect = window.innerWidth / window.innerHeight;
-                camera.updateProjectionMatrix();
-                renderer.setSize(window.innerWidth, window.innerHeight);
-            });
-        }
-
-        async function initHands() {
-            const video = document.getElementById('webcam');
-            const status = document.getElementById('status');
-
-            const hands = new Hands({
-                locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
-            });
-
-            hands.setOptions({
-                maxNumHands: 1,
-                modelComplexity: 1,
-                minDetectionConfidence: 0.5,
-                minTrackingConfidence: 0.5
-            });
-
-            hands.onResults((results) => {
-                if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-                    status.innerText = "Tracking Hand...";
-                    const landmarks = results.multiHandLandmarks[0];
-                    
-                    // 1. Expansion via Pinch (Thumb tip 4 and Index tip 8)
-                    const dx = landmarks[4].x - landmarks[8].x;
-                    const dy = landmarks[4].y - landmarks[8].y;
-                    const dist = Math.sqrt(dx*dx + dy*dy);
-                    expansion = 1.0 + dist * 8.0;
-
-                    // 2. Rotation via Hand Position
-                    particles.rotation.y = (landmarks[9].x - 0.5) * 4;
-                    particles.rotation.x = (landmarks[9].y - 0.5) * 4;
-
-                    // 3. Color via Hand Elevation
-                    baseHue = landmarks[9].y;
-
-                    // 4. Shape Switching (Simple trigger: hand high/low)
-                    if (landmarks[9].y < 0.2) switchShape(1); // Heart
-                    else if (landmarks[9].y > 0.8) switchShape(2); // Saturn
-                    else if (landmarks[4].x > 0.8) switchShape(0); // Sphere
-                } else {
-                    status.innerText = "No Hand Detected";
-                }
-            });
-
-            const cameraUtils = new Camera(video, {
-                onFrame: async () => {
-                    await hands.send({image: video});
-                },
-                width: 640,
-                height: 480
-            });
-            cameraUtils.start();
+        else {
+          const a = Math.random()*Math.PI*2;
+          const r = Math.random()*10;
+          x = Math.cos(a)*r;
+          y = Math.sin(a)*r;
+          z = Math.sin(a*8)*2;
         }
 
-        function switchShape(idx) {
-            if (idx === currentShapeIdx) return;
-            
-            const nextShapeData = new Float32Array(shapes[idx]());
-            // Move current target to origin, and new shape to target
-            particles.geometry.attributes.position.array.set(particles.geometry.attributes.position2.array);
-            particles.geometry.attributes.position.needsUpdate = true;
-            
-            particles.geometry.attributes.position2.array.set(nextShapeData);
-            particles.geometry.attributes.position2.needsUpdate = true;
-            
-            material.uniforms.uProgress.value = 0;
-            currentShapeIdx = idx;
-        }
+        positions.push(x,y,z);
+      }
 
-        function animate(time) {
-            requestAnimationFrame(animate);
-            
-            // Smooth morphing
-            material.uniforms.uProgress.value += (1.0 - material.uniforms.uProgress.value) * 0.05;
-            
-            // Update Uniforms
-            material.uniforms.uTime.value = time * 0.001;
-            material.uniforms.uExpansion.value += (expansion - material.uniforms.uExpansion.value) * 0.1;
-            material.uniforms.uBaseColor.value.setHSL(baseHue, 0.8, 0.6);
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions,3));
+      const material = new THREE.PointsMaterial({ size: 0.15, color: document.getElementById("color").value });
+      particles = new THREE.Points(geometry, material);
+      currentGroup.add(particles);
+    }
 
-            renderer.render(scene, camera);
-        }
+    /* ============================
+       HAND TRACKING
+    ============================ */
+    let handDistance = 1;
+    let fistClosed = false;
 
-        initThree();
-        initHands();
-        animate(0);
-    </script>
+    const hands = new Hands({
+      locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 2,
+      minDetectionConfidence: 0.7,
+      minTrackingConfidence: 0.7
+    });
+
+    hands.onResults(results => {
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length === 2) {
+        const a = results.multiHandLandmarks[0][0];
+        const b = results.multiHandLandmarks[1][0];
+        handDistance = Math.hypot(a.x-b.x, a.y-b.y)*5;
+      }
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks[0]) {
+        const thumb = results.multiHandLandmarks[0][4];
+        const index = results.multiHandLandmarks[0][8];
+        fistClosed = Math.hypot(thumb.x-index.x, thumb.y-index.y) < 0.05;
+      }
+    });
+
+    const cameraFeed = new Camera(document.getElementById("video"), {
+      onFrame: async () => await hands.send({ image: document.getElementById("video") }),
+      width: 640,
+      height: 480
+    });
+    cameraFeed.start();
+
+    /* ============================
+       UI EVENTS
+    ============================ */
+    document.getElementById("template").onchange = e => {
+      if (e.target.value === "solar") createSolarSystem();
+      else createParticles(e.target.value);
+    };
+
+    document.getElementById("color").oninput = e => {
+      if (particles) particles.material.color.set(e.target.value);
+    };
+
+    createSolarSystem();
+
+    /* ============================
+       ANIMATION LOOP
+    ============================ */
+    function animate() {
+      requestAnimationFrame(animate);
+
+      currentGroup.scale.setScalar(1 + handDistance);
+
+      if (fistClosed) currentGroup.rotation.y += 0.05;
+      else currentGroup.rotation.y += 0.005;
+
+      if (particles) particles.scale.setScalar(1 + audioLevel*2);
+
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    window.onresize = () => {
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    };
+  </script>
 </body>
 </html>
+
