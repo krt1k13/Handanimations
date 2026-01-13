@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Subtle Hand-Controlled Universe</title>
+    <style>
+        :root { --accent: #00ffcc; --panel: rgba(15, 15, 25, 0.75); }
+        body { margin: 0; overflow: hidden; background: #020205; font-family: 'Inter', sans-serif; color: white; }
+        canvas { display: block; touch-action: none; }
+
+        #controls {
+            position: absolute;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 85%;
+            max-width: 400px;
+            background: var(--panel);
+            backdrop-filter: blur(15px);
+            border-radius: 24px;
+            padding: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            z-index: 100;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.5);
+        }
+
+        .btn-group { display: flex; gap: 8px; }
+        button {
+            flex: 1;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: #fff;
+            padding: 12px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            cursor: pointer;
+            transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        button.active { background: white; color: black; border-color: white; }
+
+        .color-row { display: flex; align-items: center; gap: 15px; padding: 5px; }
+        #colorPicker {
+            flex-grow: 1;
+            -webkit-appearance: none;
+            height: 12px;
+            background: linear-gradient(to right, #ff0000, #ffff00, #00ff00, #00ffff, #0000ff, #ff00ff, #ff0000);
+            border-radius: 6px;
+            outline: none;
+            cursor: pointer;
+        }
+        #colorPicker::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 20px;
+            height: 20px;
+            background: white;
+            border-radius: 50%;
+            border: 2px solid #000;
+        }
+
+        #preview {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 80px;
+            height: 60px;
+            border-radius: 12px;
+            border: 1.5px solid rgba(255, 255, 255, 0.2);
+            overflow: hidden;
+            transform: scaleX(-1);
+            z-index: 50;
+        }
+        video { width: 100%; height: 100%; object-fit: cover; }
+
+        .label { position: absolute; top: 20px; left: 20px; font-size: 10px; opacity: 0.5; letter-spacing: 2px; }
+    </style>
+</head>
+<body>
+
+    <div class="label">NEURAL INTERFACE ACTIVE</div>
+
+    <div id="preview">
+        <video id="webcam" autoplay playsinline></video>
+    </div>
+
+    <div id="controls">
+        <div class="btn-group">
+            <button onclick="setTemplate('saturn')" id="btn-saturn" class="active">Saturn</button>
+            <button onclick="setTemplate('blob')" id="btn-blob">Spherical</button>
+            <button onclick="setTemplate('heart')" id="btn-heart">Heart</button>
+        </div>
+        <div class="color-row">
+            <span style="font-size: 10px; font-weight: bold;">HUE</span>
+            <input type="range" id="colorPicker" min="0" max="360" value="180">
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+
+    <script>
+        let scene, camera, renderer, points, targetPositions, velocities;
+        let palmPos = new THREE.Vector3();
+        let handActive = false, isFist = false, pinchScale = 1.0;
+        const PARTICLE_COUNT = 6000;
+        const MAG_RADIUS = 2.0; // Distance of influence
+        const MAG_STRENGTH = 0.015; // Lowered attraction strength
+
+        async function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 6;
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.body.appendChild(renderer.domElement);
+
+            const geo = new THREE.BufferGeometry();
+            const pos = new Float32Array(PARTICLE_COUNT * 3);
+            targetPositions = new Float32Array(PARTICLE_COUNT * 3);
+            velocities = new Float32Array(PARTICLE_COUNT * 3);
+            
+            for(let i=0; i<PARTICLE_COUNT*3; i++) {
+                pos[i] = (Math.random() - 0.5) * 10;
+                velocities[i] = 0;
+            }
+            
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            const mat = new THREE.PointsMaterial({
+                size: 0.04,
+                transparent: true,
+                opacity: 0.8,
+                blending: THREE.AdditiveBlending,
+                sizeAttenuation: true
+            });
+
+            points = new THREE.Points(geo, mat);
+            scene.add(points);
+
+            setupHands();
+            setTemplate('saturn');
+            animate();
+        }
+
+        function setTemplate(shape) {
+            document.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+            document.getElementById(`btn-${shape}`).classList.add('active');
+            
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                let tx, ty, tz;
+
+                if (shape === 'saturn') {
+                    if (i < PARTICLE_COUNT * 0.45) { // Core
+                        const phi = Math.acos(-1 + (2 * i) / (PARTICLE_COUNT * 0.45));
+                        const theta = Math.sqrt(PARTICLE_COUNT * 0.45 * Math.PI) * phi;
+                        tx = Math.cos(theta) * Math.sin(phi) * 1.3;
+                        ty = Math.sin(theta) * Math.sin(phi) * 1.3;
+                        tz = Math.cos(phi) * 1.3;
+                    } else { // Rings
+                        const a = Math.random() * Math.PI * 2;
+                        const r = 2.4 + Math.random() * 0.9;
+                        tx = Math.cos(a) * r;
+                        ty = (Math.random() - 0.5) * 0.1;
+                        tz = Math.sin(a) * r;
+                    }
+                } else if (shape === 'blob') {
+                    const phi = Math.acos(-1 + (2 * i) / PARTICLE_COUNT);
+                    const theta = Math.sqrt(PARTICLE_COUNT * Math.PI) * phi;
+                    tx = Math.cos(theta) * Math.sin(phi) * 2;
+                    ty = Math.sin(theta) * Math.sin(phi) * 2;
+                    tz = Math.cos(phi) * 2;
+                } else if (shape === 'heart') {
+                    const t = Math.random() * Math.PI * 2;
+                    tx = 16 * Math.pow(Math.sin(t), 3) * 0.16;
+                    ty = (13 * Math.cos(t) - 5 * Math.cos(2*t) - 2 * Math.cos(3*t) - Math.cos(4*t)) * 0.16;
+                    tz = (Math.random() - 0.5) * 0.6;
+                }
+                targetPositions[i3] = tx;
+                targetPositions[i3+1] = ty;
+                targetPositions[i3+2] = tz;
+            }
+        }
+
+        function setupHands() {
+            const videoElement = document.getElementById('webcam');
+            const hands = new Hands({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}` });
+            hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+
+            hands.onResults((res) => {
+                handActive = res.multiHandLandmarks && res.multiHandLandmarks.length > 0;
+                if (handActive) {
+                    const lm = res.multiHandLandmarks[0];
+                    // Track Palm (landmark 9)
+                    palmPos.x = (0.5 - lm[9].x) * 12; 
+                    palmPos.y = (0.5 - lm[9].y) * 9;
+                    palmPos.z = lm[9].z * -8;
+
+                    // Dist between Thumb tip (4) and Index tip (8)
+                    const pDist = Math.hypot(lm[4].x - lm[8].x, lm[4].y - lm[8].y);
+                    // Smoothed Pinch Scaling
+                    pinchScale = THREE.MathUtils.lerp(pinchScale, pDist * 8, 0.15);
+                    
+                    // Fist detection
+                    isFist = lm[8].y > lm[6].y && lm[12].y > lm[10].y;
+                }
+            });
+
+            new Camera(videoElement, {
+                onFrame: async () => { await hands.send({image: videoElement}); },
+                width: 480, height: 360
+            }).start();
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const posAttr = points.geometry.attributes.position;
+            const positions = posAttr.array;
+            
+            // Handle Color from Hue Slider
+            const hue = document.getElementById('colorPicker').value;
+            points.material.color.setHSL(hue / 360, 0.8, 0.5);
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) {
+                const i3 = i * 3;
+                
+                const curX = positions[i3];
+                const curY = positions[i3+1];
+                const curZ = positions[i3+2];
+
+                // Shape Target (Pinch Influenced)
+                const tx = targetPositions[i3] * (pinchScale + 0.2);
+                const ty = targetPositions[i3+1] * (pinchScale + 0.2);
+                const tz = targetPositions[i3+2] * (pinchScale + 0.2);
+
+                if (isFist) {
+                    velocities[i3] += (Math.random() - 0.5) * 0.3;
+                    velocities[i3+1] += (Math.random() - 0.5) * 0.3;
+                    velocities[i3+2] += (Math.random() - 0.5) * 0.3;
+                } else if (handActive) {
+                    const dx = palmPos.x - curX;
+                    const dy = palmPos.y - curY;
+                    const dz = palmPos.z - curZ;
+                    const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+
+                    if (d < MAG_RADIUS) {
+                        // Very subtle sway attraction
+                        const force = (1 - d / MAG_RADIUS) * MAG_STRENGTH;
+                        velocities[i3] += dx * force;
+                        velocities[i3+1] += dy * force;
+                        velocities[i3+2] += dz * force;
+                    }
+                }
+
+                // Return to shape + physics
+                positions[i3] += (tx - curX) * 0.035 + velocities[i3];
+                positions[i3+1] += (ty - curY) * 0.035 + velocities[i3+1];
+                positions[i3+2] += (tz - curZ) * 0.035 + velocities[i3+2];
+
+                // Stronger damping for "liquid" feel
+                velocities[i3] *= 0.88;
+                velocities[i3+1] *= 0.88;
+                velocities[i3+2] *= 0.88;
+            }
+
+            posAttr.needsUpdate = true;
+            points.rotation.y += isFist ? 0.03 : 0.003;
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        init();
+    </script>
+</body>
+</html>
+
